@@ -16,11 +16,32 @@
   * Entre 8 GB y 16 GB de RAM: Swap = tamaño de RAM.
   * Superior a 16 GB de RAM: 16 GB Swap fijo.
 * **Espacio en Disco:**
-  * `/u01` (Binarios de Software): Mínimo 30 GB.
-  * `/u02` (Datafiles / `oradata`): Mínimo 50 GB (según volumen proyectado).
-  * `/u03` o `/u02/fast_recovery_area` (FRA / Backups): Mínimo equivalente al doble del tamaño de los datos.
+  * `/u01` (Binarios de Software y Motor): Mínimo 30 GB.
+  * `/u02` (Datos Principales / `oradata`): Mínimo 50 GB (según volumen proyectado).
+  * `/u03` (Fast Recovery Area / Backups): Mínimo equivalente al doble del tamaño de los datos.
 
-### 1.2. Reglas de Licenciamiento para Oracle 12c R1 (12.1.0.2.0) Standard Edition (SE)
+### 1.2. Arquitectura de Almacenamiento OFA y Segregación de Discos (Producción)
+
+Tener `oradata` y la **Fast Recovery Area (FRA)** conviviendo en el mismo punto de montaje (`/u02`) representa un **riesgo crítico de disponibilidad y rendimiento**, especialmente en entornos de producción:
+
+* **Punto único de fallo (SPOF - Single Point of Failure):** Si el volumen físico o LUN de `/u02` se corrompe o sufre una falla de hardware, se pierden simultáneamente los datos activos y las copias de seguridad / archivelogs necesarios para recuperarlos.
+* **Riesgo de congelamiento de la base de datos (Database Hang):** Si la FRA se llena (por ejemplo, porque falló la ejecución o purga de backups de archivelogs con RMAN), ocupará el 100% de `/u02`. En ese instante, los datafiles no podrán autoextenderse y la base de datos se detendrá por completo (*hang* transaccional).
+* **Contención de I/O (Cuello de botella transaccional):** Las lecturas y escrituras transaccionales aleatorias (OLTP) de los datafiles compiten directamente contra la escritura secuencial continua de los archivelogs y las lecturas/escrituras masivas de RMAN durante las ventanas de copia de seguridad.
+
+#### Arquitectura Robusta Recomendada (Filesystem / OFA)
+Una arquitectura empresarial estándar bajo la especificación **OFA (*Optimal Flexible Architecture*)** requiere separar el almacenamiento en al menos **tres puntos de montaje independientes**, respaldados por discos físicos, arreglos RAID o LUNs dedicadas distintas:
+
+| Punto de montaje | Propósito principal | Tipo de I/O | Contenido |
+| :--- | :--- | :--- | :--- |
+| **`/u01`** | Binarios y Software | Lectura baja / Logs | `$ORACLE_HOME`, `$ORACLE_BASE`, inventario (`oraInventory`), trazas y `diag/`. |
+| **`/u02`** | Datos Principales (DATA) | Aleatoria (OLTP) | Archivos de datos (`.dbf`), Miembro 1 de cada grupo de Redo Log, Copia 1 del Controlfile. |
+| **`/u03`** | Área de Recuperación (FRA) | Secuencial intensiva | Archivelogs, Backups RMAN, Flashback logs, Miembro 2 de Redo Log, Copia 2 del Controlfile. |
+
+> [!IMPORTANT]
+> **Estrategia de Resiliencia y Multiplexación:**  
+> Separar `/u02` y `/u03` en volúmenes físicamente independientes no solo aísla la carga de I/O y previene el congelamiento de la base de datos, sino que permite implementar la regla de oro de Oracle: **multiplexar los Controlfiles y los grupos de Redo Logs** entre volúmenes distintos. Si se pierde el almacenamiento de `/u02`, la base de datos cuenta con la copia del controlfile y el miembro del redo log en `/u03`, permitiendo la recuperación completa sin pérdida de información (*Zero Data Loss*).
+
+### 1.3. Reglas de Licenciamiento para Oracle 12c R1 (12.1.0.2.0) Standard Edition (SE)
 Para la versión **12.1.0.2.0**, las métricas y restricciones de licenciamiento oficiales son las siguientes:
 
 * **Capacidad Máxima de Hardware (Sockets):**
@@ -176,18 +197,27 @@ setenforce 0
 ## 3. Estructura de Directorios (OFA) y Variables de Entorno
 
 ### 3.1. Creación de Directorios y Permisos
-Seguiremos la convención OFA (*Optimal Flexible Architecture*):
+Seguiremos la convención OFA (*Optimal Flexible Architecture*) separando binarios, datos y área de recuperación:
 
 ```bash
-mkdir -p /u01/app/oracle/product/12.2.0/dbhome_1
+# Directorios de software y binarios (/u01)
+mkdir -p /u01/app/oracle/product/12.1.0/dbhome_1
 mkdir -p /u01/app/oraInventory
-mkdir -p /u02/oradata
-mkdir -p /u02/fast_recovery_area
 mkdir -p /u01/stage
 
-chown -R oracle:oinstall /u01 /u02
-chmod -R 775 /u01 /u02
+# Directorio de datos transaccionales / DATA (/u02)
+mkdir -p /u02/oradata
+
+# Directorio de Fast Recovery Area / FRA (/u03 recomendado en producción)
+mkdir -p /u03/fast_recovery_area
+
+# Asignar propiedad y permisos
+chown -R oracle:oinstall /u01 /u02 /u03
+chmod -R 775 /u01 /u02 /u03
 ```
+
+> **Nota de Arquitectura (Producción vs Laboratorio):**  
+> En cumplimiento con la especificación OFA para producción (Sección 1.2), `/u03` corresponde al punto de montaje en un disco físico o LUN independiente para la FRA. Si te encuentras en un entorno de desarrollo o laboratorio con un único disco de datos disponible, puedes utilizar provisionalmente `/u02/fast_recovery_area` (`mkdir -p /u02/fast_recovery_area`) y omitir `/u03`.
 
 ---
 
@@ -209,7 +239,7 @@ export ORACLE_HOSTNAME=dbprod01.empresa.local
 export ORACLE_UNQNAME=PROD12C
 export ORACLE_SID=PROD12C
 export ORACLE_BASE=/u01/app/oracle
-export ORACLE_HOME=$ORACLE_BASE/product/12.2.0/dbhome_1
+export ORACLE_HOME=$ORACLE_BASE/product/12.1.0/dbhome_1
 export ORA_INVENTORY=/u01/app/oraInventory
 
 export TNS_ADMIN=$ORACLE_HOME/network/admin
@@ -301,7 +331,7 @@ Abre una terminal como `root` y ejecútalos en orden:
 /u01/app/oraInventory/orainstRoot.sh
 
 # 2. Script de configuración global de Oracle Home y oratab
-/u01/app/oracle/product/12.2.0/dbhome_1/root.sh
+/u01/app/oracle/product/12.1.0/dbhome_1/root.sh
 ```
 
 ---
@@ -371,10 +401,11 @@ La *Fast Recovery Area* (FRA) es la ubicación de almacenamiento centralizada y 
 Al haberse creado la base de datos en el punto 7 sin definir los parámetros de FRA en DBCA, **es obligatorio configurarla antes de habilitar el modo ARCHIVELOG**. De lo contrario, Oracle generará los archivelogs en el destino por defecto del motor (`$ORACLE_HOME/dbs`), saturando el volumen de binarios `/u01`.
 
 #### 8.1.1. Comprobación del Directorio Físico
-Verifica que el directorio `/u02/fast_recovery_area` (creado en el punto 3.1) exista y mantenga permisos de escritura para `oracle:oinstall`:
+Verifica que el directorio `/u03/fast_recovery_area` (o `/u02/fast_recovery_area` si se utiliza un único disco en laboratorio) exista y mantenga permisos de escritura para `oracle:oinstall`:
 ```bash
-ls -ld /u02/fast_recovery_area
+ls -ld /u03/fast_recovery_area
 # Debe mostrar propietario oracle:oinstall y permisos 775 (drwxrwxr-x)
+# (En entornos de laboratorio: ls -ld /u02/fast_recovery_area)
 ```
 
 #### 8.1.2. Configuración de Parámetros Dinámicos (SQL*Plus)
@@ -384,11 +415,11 @@ Dentro de la sesión `sqlplus / as sysdba`, ejecuta los siguientes comandos:
 > `ORA-01261: Parameter db_recovery_file_dest destination string cannot be set to '' without db_recovery_file_dest_size`.
 
 ```sql
--- 1. Definir la cuota máxima de espacio para la FRA (ajustar según el disco /u02, ej. 50 GB)
+-- 1. Definir la cuota máxima de espacio para la FRA (ajustar según el disco /u03, ej. 50 GB)
 ALTER SYSTEM SET DB_RECOVERY_FILE_DEST_SIZE = 50G SCOPE=BOTH;
 
--- 2. Definir la ruta física de la FRA
-ALTER SYSTEM SET DB_RECOVERY_FILE_DEST = '/u02/fast_recovery_area' SCOPE=BOTH;
+-- 2. Definir la ruta física de la FRA (recomendado /u03 en volumen independiente; o /u02 para lab)
+ALTER SYSTEM SET DB_RECOVERY_FILE_DEST = '/u03/fast_recovery_area' SCOPE=BOTH;
 
 -- 3. Enlazar explícitamente el destino principal de archivado a la FRA
 ALTER SYSTEM SET LOG_ARCHIVE_DEST_1 = 'LOCATION=USE_DB_RECOVERY_FILE_DEST' SCOPE=BOTH;
@@ -451,7 +482,8 @@ WHERE sequence# = (SELECT MAX(sequence#) FROM v$archived_log);
 
 Desde la terminal del sistema operativo, corrobora la creación de la estructura OMF bajo la FRA:
 ```bash
-ls -la /u02/fast_recovery_area/PROD12C/archivelog/
+ls -la /u03/fast_recovery_area/PROD12C/archivelog/
+# (O /u02/fast_recovery_area/PROD12C/archivelog/ en caso de laboratorio)
 ```
 
 ---
@@ -519,17 +551,28 @@ SELECT con_id, name, open_mode, restricted FROM v$pdbs;
 
 ---
 
-### 8.4. Redimensionamiento de Redo Logs
-La plantilla de propósito general suele crear 3 grupos de solo 200 MB, lo cual genera saturación de I/O en producción. Se deben crear grupos de mínimo 1 GB (1024 MB):
+### 8.4. Redimensionamiento y Multiplexación de Redo Logs
+La plantilla de propósito general suele crear 3 grupos de solo 200 MB con un único miembro, lo cual genera saturación de I/O en producción y riesgo de pérdida de datos ante fallo de disco. Se deben crear nuevos grupos de mínimo 1 GB (1024 MB) y multiplexar sus miembros entre `/u02` (DATA) y `/u03` (FRA) conforme a la arquitectura OFA definida en la Sección 1.2:
 
 ```sql
 -- Consultar grupos actuales
 SELECT group#, bytes/1024/1024 MB, status FROM v$log;
 
--- Crear nuevos grupos de 1 GB
-ALTER DATABASE ADD LOGFILE GROUP 4 ('/u02/oradata/PROD12C/redo04a.log') SIZE 1024M;
-ALTER DATABASE ADD LOGFILE GROUP 5 ('/u02/oradata/PROD12C/redo05a.log') SIZE 1024M;
-ALTER DATABASE ADD LOGFILE GROUP 6 ('/u02/oradata/PROD12C/redo06a.log') SIZE 1024M;
+-- Crear nuevos grupos de 1 GB multiplexados entre /u02 (DATA) y /u03 (FRA)
+ALTER DATABASE ADD LOGFILE GROUP 4 (
+  '/u02/oradata/PROD12C/redo04a.log',
+  '/u03/fast_recovery_area/PROD12C/redo04b.log'
+) SIZE 1024M;
+
+ALTER DATABASE ADD LOGFILE GROUP 5 (
+  '/u02/oradata/PROD12C/redo05a.log',
+  '/u03/fast_recovery_area/PROD12C/redo05b.log'
+) SIZE 1024M;
+
+ALTER DATABASE ADD LOGFILE GROUP 6 (
+  '/u02/oradata/PROD12C/redo06a.log',
+  '/u03/fast_recovery_area/PROD12C/redo06b.log'
+) SIZE 1024M;
 
 -- Conmutar logs hasta que los grupos viejos (1, 2, 3) queden en estado INACTIVE
 ALTER SYSTEM CHECKPOINT;
@@ -540,6 +583,11 @@ ALTER DATABASE DROP LOGFILE GROUP 1;
 ALTER DATABASE DROP LOGFILE GROUP 2;
 ALTER DATABASE DROP LOGFILE GROUP 3;
 ```
+
+> [!TIP]
+> **Multiplexación de Controlfiles y Redo Logs en Laboratorios:**  
+> En producción, esta configuración asegura que ante la caída total del almacenamiento `/u02` o `/u03`, la base de datos mantenga un miembro íntegro de redo log activo. Si ejecutas esta guía en una máquina virtual de desarrollo con un solo disco adicional, puedes alojar el segundo miembro bajo `/u02/fast_recovery_area/PROD12C/redo0Xb.log`.  
+> Del mismo modo, valida que el parámetro `CONTROL_FILES` apunte a copias distribuidas (ej. `/u02/oradata/PROD12C/control01.ctl` y `/u03/fast_recovery_area/PROD12C/control02.ctl`).
 
 ---
 
@@ -629,7 +677,7 @@ Ejecuta las siguientes comprobaciones para certificar que el entorno está listo
    ```bash
    su - oracle -c "sqlplus -s / as sysdba <<< 'SELECT name, space_limit/1024/1024/1024 GB_LIMIT, space_used/1024/1024/1024 GB_USED FROM v\$recovery_file_dest;'"
    ```
-   *Debe listar `/u02/fast_recovery_area` y mostrar el espacio configurado.*
+   *Debe listar `/u03/fast_recovery_area` (o `/u02/fast_recovery_area` en laboratorios) y mostrar el espacio configurado.*
 
 4. **Modo Archivelog:**
    ```bash
