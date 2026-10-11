@@ -233,7 +233,7 @@ Edita `/home/oracle/.bash_profile` añadiendo el siguiente bloque:
 cat << 'EOF' >> ~/.bash_profile
 
 # --------------------------------------------------
-# Entorno de Producción Oracle 12c SE2
+# Entorno de Producción Oracle 12c SE
 # --------------------------------------------------
 export ORACLE_HOSTNAME=dbprod01.empresa.local
 export ORACLE_UNQNAME=PROD12C
@@ -260,7 +260,7 @@ source ~/.bash_profile
 
 ## 4. Descompresión de Binarios
 
-Copia el medio de instalación oficial de Oracle 12.2.0.1 (ej. `linuxx64_12201_database.zip`) en el directorio `/u01/stage` y descomprímelo como usuario `oracle`:
+Copia el medio de instalación oficial de Oracle 12.1.0.2.0 (ej. `linuxx64_12201_database.zip`) en el directorio `/u01/stage` y descomprímelo como usuario `oracle`:
 
 ```bash
 cd /u01/stage
@@ -278,7 +278,7 @@ Como usuario `oracle`, crea el archivo `/u01/stage/db_install_se2.rsp`:
 
 ```ini
 # ==============================================================================
-# ARCHIVO DE RESPUESTA PARA INSTALACIÓN SILENCIOSA DE ORACLE 12.1 SE2
+# ARCHIVO DE RESPUESTA PARA INSTALACIÓN SILENCIOSA DE ORACLE 12.1 SE
 # ==============================================================================
 oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v12.1.0
 oracle.install.option=INSTALL_DB_SWONLY
@@ -296,7 +296,6 @@ oracle.install.db.OPER_GROUP=oper
 oracle.install.db.BACKUPDBA_GROUP=backupdba
 oracle.install.db.DGDBA_GROUP=dgdba
 oracle.install.db.KMDBA_GROUP=kmdba
-oracle.install.db.RACDBA_GROUP=racdba # Agregar solo si el 12.2.0.1.0 SE2
 
 # Desactivar soporte de Oracle Support / My Oracle Support en la instalación
 SECURITY_UPDATES_VIA_MYORACLESUPPORT=false
