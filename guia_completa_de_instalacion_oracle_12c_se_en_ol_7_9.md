@@ -551,7 +551,10 @@ SELECT con_id, name, open_mode, restricted FROM v$pdbs;
 ---
 
 ### 8.4. Redimensionamiento y Multiplexación de Redo Logs
-La plantilla de propósito general suele crear 3 grupos de solo 200 MB con un único miembro, lo cual genera saturación de I/O en producción y riesgo de pérdida de datos ante fallo de disco. Se deben crear nuevos grupos de mínimo 1 GB (1024 MB) y multiplexar sus miembros entre `/u02` (DATA) y `/u03` (FRA) conforme a la arquitectura OFA definida en la Sección 1.2:
+La plantilla de propósito general suele crear 3 grupos de solo 200 MB con un único miembro, lo cual genera saturación de I/O en producción y riesgo de pérdida de datos ante fallo de disco. A continuación se detallan los dos métodos para asegurar la multiplexación conforme a la arquitectura OFA definida en la Sección 1.2:
+
+#### 8.4.1. Método 1: Creación de Nuevos Grupos Redimensionados y Multiplexados (Reemplazo Recomendado)
+Si se requiere ampliar el tamaño a un mínimo de 1 GB (1024 MB) y multiplexar desde cero entre `/u02` (DATA) y `/u03` (FRA), para luego retirar los grupos originales:
 
 ```sql
 -- Consultar grupos actuales
@@ -582,6 +585,32 @@ ALTER DATABASE DROP LOGFILE GROUP 1;
 ALTER DATABASE DROP LOGFILE GROUP 2;
 ALTER DATABASE DROP LOGFILE GROUP 3;
 ```
+
+#### 8.4.2. Método 2: Multiplexar Grupos Existentes sin Recrearlos (`ADD LOGFILE MEMBER`)
+Si los archivos `.log` ya están creados con el tamaño apropiado pero inicialmente **no se configuraron con multiplexado** (cada grupo tiene un solo miembro), no es necesario eliminar los grupos ni recrearlos. Se puede agregar en caliente un segundo archivo `.log` espejo a cada grupo existente utilizando `ALTER DATABASE ADD LOGFILE MEMBER`:
+
+```sql
+-- 1. Consultar miembros y grupos existentes para ver su estado actual
+SELECT group#, status, type, member FROM v$logfile ORDER BY group#;
+
+-- 2. Agregar un segundo miembro (espejo en /u03) a cada grupo existente
+-- (Nota: No se especifica SIZE, Oracle asigna automáticamente el mismo tamaño del grupo)
+ALTER DATABASE ADD LOGFILE MEMBER '/u03/fast_recovery_area/PROD12C/redo01b.log' TO GROUP 1;
+ALTER DATABASE ADD LOGFILE MEMBER '/u03/fast_recovery_area/PROD12C/redo02b.log' TO GROUP 2;
+ALTER DATABASE ADD LOGFILE MEMBER '/u03/fast_recovery_area/PROD12C/redo03b.log' TO GROUP 3;
+
+-- 3. Forzar conmutación para sincronizar y comenzar a escribir en los nuevos miembros
+ALTER SYSTEM CHECKPOINT;
+ALTER SYSTEM SWITCH LOGFILE;
+
+-- 4. Validar que los miembros multiplexados estén operativos
+SELECT group#, status, type, member FROM v$logfile ORDER BY group#;
+```
+
+> [!NOTE]
+> **Estado `INVALID` tras agregar un miembro:**  
+> Inmediatamente después de ejecutar `ALTER DATABASE ADD LOGFILE MEMBER`, al consultar `v$logfile` es normal que la columna `STATUS` del nuevo miembro figure como `INVALID`.  
+> Este es el comportamiento esperado en Oracle: indica que el archivo físico ya existe en disco pero aún no ha recibido bloques de redo. Una vez que la instancia rota el logfile y escribe en él (o tras ejecutar `SWITCH LOGFILE`), el estado pasará a quedar en blanco (`NULL`), indicando que el miembro está activo y completamente sincronizado.
 
 > [!TIP]
 > **Multiplexación de Controlfiles y Redo Logs en Laboratorios:**  
